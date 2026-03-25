@@ -1,0 +1,310 @@
+\documentclass[11pt,a4paper]{ctexart}
+
+\usepackage[a4paper,margin=2.35cm]{geometry}
+\usepackage{fontspec}
+\usepackage{setspace}
+\usepackage{indentfirst}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{lastpage}
+
+\setmainfont{Times New Roman}
+\setsansfont{Times New Roman}
+\setmonofont{Consolas}
+\setCJKmainfont[AutoFakeBold=2.5,AutoFakeSlant=0.18]{SimSun}
+\setCJKsansfont[AutoFakeBold=1.8]{STFangsong}
+\setCJKmonofont{SimSun}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=black,
+  citecolor=black,
+  pdftitle={MT5 + TSLib Quant Written Test},
+  pdfauthor={Codex}
+}
+
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.35em}
+\setstretch{1.18}
+\setlist[enumerate]{leftmargin=2.2em,itemsep=0.25em,topsep=0.25em}
+\setlist[itemize]{leftmargin=2em,itemsep=0.25em,topsep=0.25em}
+
+\definecolor{titlegray}{RGB}{60,60,60}
+
+\titleformat{\section}
+  {\Large\bfseries\color{titlegray}}
+  {\thesection.}{0.6em}{}
+\titleformat{\subsection}
+  {\large\bfseries}
+  {\thesubsection}{0.6em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small MT5 + TSLib 研究答卷}
+\fancyhead[R]{\small \thepage/\pageref*{LastPage}}
+\renewcommand{\headrulewidth}{0.3pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+
+\begin{document}
+
+\begin{center}
+  {\zihao{2}\bfseries 基于 MT5 与清华 TSLib 的深度时间序列交易研究\par}
+  \vspace{0.7em}
+  {\small 数据源：MT5 模拟账户历史行情 \quad 模型库：Time-Series-Library (TSLib)\par}
+  \vspace{0.25em}
+  {\small 复现实验仓库：\url{https://github.com/GoodNight0721/Time-Series-Library}\par}
+\end{center}
+
+\vspace{0.6em}
+\hrule
+\vspace{0.9em}
+
+\section{任务理解与研究闭环}
+
+题目要求把 MT5 历史行情与清华大学龙明盛课题组维护的 TSLib 结合起来，做出一套能够落到交易指标上的最小研究闭环，并回答两个核心问题：第一，模型预测是否真的能够转化成可审计的交易表现；第二，在哪些品种、哪些周期下，深度学习相对简单线性模型更有价值。
+
+研究流程如下：
+\begin{enumerate}
+  \item 从 MT5 导出真实 K 线，构造成 TSLib 可直接读取的 \texttt{custom CSV}；
+  \item 用统一切分规则训练多类 TSLib 模型，保存 \texttt{pred.npy} 与 \texttt{true.npy}；
+  \item 将预测收益映射成多空信号，并在统一成本假设下计算胜率、盈亏比、累计收益与最大回撤；
+  \item 对比不同资产、不同周期、不同模型，判断“深度学习更适合哪里”。
+\end{enumerate}
+
+本文重点放在三件事上：工程链路是否闭环、回测口径是否正确、结论是否足够克制。
+
+\section{数据与实验设计}
+
+\subsection{数据来源与资产覆盖}
+
+本次实验使用 MT5 模拟账户可直接获取的三类资产：
+\begin{itemize}
+  \item 外汇：\texttt{EURUSD}、\texttt{GBPUSD}、\texttt{USDJPY}
+  \item 贵金属：\texttt{XAUUSD}、\texttt{XAGUSD}
+  \item 指数 CFD：\texttt{US500}、\texttt{USTEC}
+\end{itemize}
+
+周期覆盖上，外汇与黄金使用 \texttt{M15/H1/H4}，白银与指数使用 \texttt{H1/H4}。大部分组合统一导出约 \texttt{12000} 根 K 线；\texttt{USTEC H4} 由于 MT5 历史缓存限制，仅有约 \texttt{5493} 根。
+
+导出的每条样本包含时间戳以及 12 个数值特征，其中预测目标为 \texttt{close}。其余特征主要包括：
+\begin{itemize}
+  \item 价格与成交字段：\texttt{open}、\texttt{high}、\texttt{low}、\texttt{tick\_volume}、\texttt{spread}、\texttt{real\_volume}
+  \item 派生波动字段：\texttt{range}、\texttt{body}、\texttt{return\_1}、\texttt{log\_return\_1}、\texttt{hl\_ratio}
+\end{itemize}
+
+\subsection{训练与回测口径}
+
+所有实验统一使用 TSLib 的 \texttt{Dataset\_Custom} 切分逻辑：
+\begin{itemize}
+  \item 训练集：70\%
+  \item 验证集：10\%
+  \item 测试集：20\%
+\end{itemize}
+
+基础超参数设定为：
+\begin{itemize}
+  \item \texttt{seq\_len = 96}
+  \item \texttt{label\_len = 48}
+  \item \texttt{pred\_len = 1}
+  \item \texttt{batch\_size = 64}
+  \item \texttt{d\_model = 64}
+  \item \texttt{d\_ff = 128}
+  \item \texttt{n\_heads = 4}
+\end{itemize}
+
+模型分为三组：
+\begin{itemize}
+  \item 线性基线：\texttt{DLinear}
+  \item 主力深度模型：\texttt{PatchTST}
+  \item 额外补充模型：\texttt{TimesNet}、\texttt{iTransformer}
+\end{itemize}
+
+另外补充测试了更多工具箱模型。\texttt{TimeMixer} 在当前自定义频率配置下暴露出频率映射与前向维度问题，\texttt{SegRNN} 在本任务设定下出现形状错误，因此未纳入主比较表。这表明并不是所有 TSLib 模型都能在 MT5 自定义数据接口上直接稳定落地。
+
+交易映射规则统一定义为：
+\begin{itemize}
+  \item 当预测下一根收益率大于阈值 $\theta$ 时做多；
+  \item 当预测下一根收益率小于 $-\theta$ 时做空；
+  \item 否则空仓。
+\end{itemize}
+
+基础回测口径采用：
+\begin{itemize}
+  \item 阈值：\texttt{3 bps}
+  \item 往返总成本：\texttt{2 bps}
+  \item 持有期：\texttt{1} 根 K 线
+\end{itemize}
+
+\section{实现审计与口径校验}
+
+结果解释前，对以下几处链路做了审计：
+\begin{enumerate}
+  \item 检查了 \texttt{Dataset\_Custom} 的测试集切分、滑窗索引和 \texttt{pred.npy/true.npy} 的保存逻辑，确认预测值与原始 CSV 在时间上严格对齐。
+  \item 手工抽查了 \texttt{GBPUSD M15} 的测试样本，验证 \texttt{true.npy} 中标签与对应时间点的原始 \texttt{close} 一致，不存在标签错位。
+  \item 修正了早期版本中的成本口径问题：\texttt{cost\_bps} 应解释为往返总成本，而不是重复乘以 2 之后再扣减。
+  \item 额外比较了“上一根收盘到下一根收盘”和“下一根开盘到下一根收盘”两种实现，数值会变化，但不会推翻方向性结论。
+\end{enumerate}
+
+下文的负收益并非由代码错位造成，而是在当前任务定义和成本假设下得到的结果。
+
+\section{核心结果}
+
+\subsection{基础设定下的主结果}
+
+表 \ref{tab:fx_compare} 展示了外汇主流货币对上，\texttt{DLinear} 与 \texttt{PatchTST} 的核心比较。这里保留的是最能回答题目的部分：同一品种、同一周期下，深度模型相对线性基线到底提升了多少。
+
+\begin{table}[htbp]
+\centering
+\caption{外汇主组合上 DLinear 与 PatchTST 的对比（3bps 阈值，2bps 往返成本）}
+\label{tab:fx_compare}
+\small
+\begin{tabular}{C{1.8cm} C{1.2cm} C{1.8cm} C{1.8cm} C{1.6cm} C{1.6cm}}
+\toprule
+品种 & 周期 & DLinear累计收益 & PatchTST累计收益 & 收益改善 & PatchTST最大回撤 \\
+\midrule
+EURUSD & M15 & -31.40\% & -12.34\% & +19.06\% & 12.36\% \\
+GBPUSD & M15 & -30.95\% & -13.37\% & +17.58\% & 13.37\% \\
+USDJPY & M15 & -30.85\% & -17.97\% & +12.88\% & 18.00\% \\
+EURUSD & H1  & -35.12\% & -21.85\% & +13.27\% & 22.21\% \\
+GBPUSD & H1  & -31.48\% & -22.88\% & +8.61\%  & 23.23\% \\
+USDJPY & H1  & -38.69\% & -28.98\% & +9.71\%  & 28.98\% \\
+EURUSD & H4  & -35.68\% & -29.83\% & +5.85\%  & 31.19\% \\
+GBPUSD & H4  & -30.32\% & -31.14\% & -0.82\%  & 32.33\% \\
+USDJPY & H4  & -33.51\% & -29.30\% & +4.21\%  & 31.52\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+表中可见，深度模型的相对增益主要集中在外汇主流货币对的 \texttt{M15/H1} 上；同时，基础设定下绝大多数组合仍然为负，说明当前信号强度还不足以稳定覆盖交易摩擦。
+
+\subsection{跨资产与多模型补充}
+
+若只看外汇，会得到“深度学习总体优于线性模型”的结论；这一结论在跨资产上并不成立。将实验扩展到贵金属、指数和更多模型后，结果如表 \ref{tab:cross_model} 所示。
+
+\begin{table}[htbp]
+\centering
+\caption{跨资产与额外模型的代表性结果}
+\label{tab:cross_model}
+\small
+\begin{tabular}{C{1.8cm} C{1.2cm} C{1.8cm} C{1.6cm} C{1.4cm} C{1.3cm}}
+\toprule
+品种 & 周期 & 模型 & 累计收益 & 最大回撤 & 盈利因子 \\
+\midrule
+EURUSD & H1 & TimesNet     & -20.12\% & 20.56\% & 0.518 \\
+EURUSD & H4 & iTransformer & -22.95\% & 25.36\% & 0.829 \\
+USTEC  & H4 & DLinear      & +7.49\%  & 17.92\% & 1.050 \\
+USTEC  & H4 & iTransformer & +7.54\%  & 10.47\% & 1.051 \\
+USTEC  & H4 & PatchTST     & -8.39\%  & 22.15\% & 0.954 \\
+US500  & H1 & PatchTST     & -23.05\% & 24.26\% & 0.812 \\
+XAGUSD & H4 & DLinear      & -80.72\% & 84.96\% & 0.837 \\
+XAGUSD & H4 & PatchTST     & -37.91\% & 61.49\% & 0.962 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+这里最关键的发现有三个：
+\begin{enumerate}
+  \item 深度学习并不是在所有资产上都最优。当前设定下，\texttt{USTEC H4} 的最好结果来自 \texttt{iTransformer} 与 \texttt{DLinear}，而不是 \texttt{PatchTST}。
+  \item \texttt{TimesNet} 在 \texttt{H1} 外汇上是可用的，而且表现接近 \texttt{PatchTST}；但它对 \texttt{15min} 和 \texttt{4h} 自定义频率的兼容性较差。
+  \item 贵金属在当前单步交易设定下整体偏弱，尤其白银的波动虽然大，但可交易的净收益结构并不理想。
+\end{enumerate}
+
+据此，可将结论概括为：深度学习的相对优势集中在部分市场与周期上，跨资产后结果明显分化。
+
+\subsection{已完成的补充实验}
+
+围绕训练轮数、阈值过滤和模型集合，额外完成了三类补充实验。
+
+\textbf{第一类：延长训练轮数。} 将外汇核心组合上的 \texttt{PatchTST} 从 \texttt{3 epochs} 提高到 \texttt{10 epochs}。结果普遍改善，但改善幅度有限：
+\begin{itemize}
+  \item \texttt{EURUSD M15}：\(-12.34\%\) 改善到 \(-10.76\%\)
+  \item \texttt{GBPUSD M15}：\(-13.37\%\) 改善到 \(-12.01\%\)
+  \item \texttt{USDJPY H4}：\(-29.30\%\) 改善到 \(-27.65\%\)
+\end{itemize}
+
+这说明 \texttt{3 epochs} 偏少，但并不是唯一瓶颈。更长训练可以改善结果，却不足以从根本上把大多数组合翻成正收益。
+
+\textbf{第二类：阈值过滤。} 在 \texttt{10 epochs} 的 \texttt{PatchTST} 结果上重新做了阈值敏感性分析。代表性结果见表 \ref{tab:threshold_10ep}。
+
+\begin{table}[htbp]
+\centering
+\caption{PatchTST（10 epochs）阈值敏感性代表结果}
+\label{tab:threshold_10ep}
+\small
+\begin{tabular}{C{1.8cm} C{1.2cm} C{1.2cm} C{1.3cm} C{1.5cm} C{1.5cm}}
+\toprule
+品种 & 周期 & 阈值 & 交易次数 & 累计收益 & 最大回撤 \\
+\midrule
+GBPUSD & M15 & 3 bps  & 728 & -12.01\% & 12.01\% \\
+GBPUSD & M15 & 12 bps & 28  & +0.47\%  & 0.18\% \\
+GBPUSD & M15 & 15 bps & 8   & +0.15\%  & 0.11\% \\
+USDJPY & H4  & 20 bps & 426 & +0.60\%  & 6.67\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+阈值结果表明，模型的 alpha 主要集中在高置信度样本上；在基础设定下，大量边际信号进入交易后，净收益被交易成本明显侵蚀。
+
+\textbf{第三类：扩展模型集合。} 补跑了 \texttt{iTransformer}，并尝试了 \texttt{TimeMixer} 与 \texttt{SegRNN}。\texttt{iTransformer} 在 \texttt{USTEC H4} 上与 \texttt{DLinear} 几乎持平且略优；\texttt{TimeMixer} 与 \texttt{SegRNN} 暂时没有在这套 MT5 自定义频率接口上稳定跑通。模型可用性也纳入比较范围。
+
+\section{哪个品种、哪个周期更适合深度学习}
+
+这里需要区分“适合深度学习”与“当前绝对收益最好”两个问题。
+
+\subsection{如果按“深度模型相对线性模型的增益”来定义}
+
+排序为：
+\begin{center}
+\texttt{EURUSD} \quad $>$ \quad \texttt{GBPUSD} \quad $>$ \quad \texttt{USDJPY}
+\end{center}
+
+周期排序是：
+\begin{center}
+\texttt{M15} \quad $>$ \quad \texttt{H1} \quad $>$ \quad \texttt{H4}
+\end{center}
+
+原因是：
+\begin{itemize}
+  \item \texttt{EURUSD} 与 \texttt{GBPUSD} 在 \texttt{M15/H1} 上，对 \texttt{DLinear} 的改善最明显；
+  \item \texttt{USDJPY} 也有改善，但整体略弱于前两者；
+  \item 到 \texttt{H4} 时，深度模型相对线性模型的边际优势明显收缩。
+\end{itemize}
+
+若以“深度模型相对简单基线的增益”来回答，则结论是：\textbf{外汇主流货币对，尤其是 \texttt{EURUSD/GBPUSD} 的 \texttt{M15} 与 \texttt{H1}}。
+
+\subsection{如果按“当前测试设定下绝对收益最好”来定义}
+
+若按绝对收益衡量，则 \textbf{\texttt{USTEC H4}} 是当前已跑组合中的正收益样本，最好结果来自 \texttt{iTransformer}（\(+7.54\%\)）和 \texttt{DLinear}（\(+7.49\%\)），并不是 \texttt{PatchTST}。
+
+\begin{quote}
+在“深度学习是否比线性基线更有增益”这个问题上，外汇 \texttt{M15/H1} 最适合深度学习；在“当前哪组参数下绝对收益最好”这个问题上，指数低频场景 \texttt{USTEC H4} 更突出，但其最优模型未必是传统意义上的深度 patch 模型。
+\end{quote}
+
+\section{最终结论}
+
+最终结论如下：
+
+\begin{quote}
+MT5 与 TSLib 可以被拼成一套可复现、可审计的最小研究闭环，并能落到胜率、盈亏比和最大回撤这些交易指标上。基础设定下，大多数组合仍为负收益，但这并不意味着模型没有信息，而是意味着当前策略还停留在“弱正毛利 alpha、尚未稳定覆盖交易摩擦”的阶段。若把“适合深度学习”定义为相对线性模型的增益，则最适合的标的是 \texttt{EURUSD} 与 \texttt{GBPUSD}，最适合的周期是 \texttt{M15}，其次是 \texttt{H1}。若看当前绝对收益，则 \texttt{USTEC H4} 是最有价值的继续研究样本，而且最佳结果来自 \texttt{iTransformer/DLinear}，说明跨资产后不应预设深度模型一定占优。
+\end{quote}
+
+
+\vspace{0.8em}
+\hrule
+\vspace{0.7em}
+
+{\small
+说明：正文中引用的实验结果已对应落地在仓库 \texttt{quant/outputs} 与 \texttt{results} 目录中，可直接复核。}
+
+\end{document}
